@@ -1,7 +1,6 @@
 set_failed_anchor: &set_failed
   do:
   - task: on_failure_set_failed
-    tags: ["ccp"]
     config:
       platform: linux
       image_resource:
@@ -13,12 +12,16 @@ set_failed_anchor: &set_failed
         - name: ccp_src
         - name: terraform
       run:
-        path: 'ccp_src/aws/ccp_failed_test.sh'
+        path: 'ccp_src/google/ccp_failed_test.sh'
       params:
         AWS_ACCESS_KEY_ID: {{tf-machine-access-key-id}}
         AWS_SECRET_ACCESS_KEY: {{tf-machine-secret-access-key}}
         AWS_DEFAULT_REGION: {{tf-machine-region}}
-        BUCKET_PATH: clusters/
+        GOOGLE_CREDENTIALS: {{google-service-account-key}}
+        GOOGLE_PROJECT_ID: {{google-project-id}}
+        GOOGLE_ZONE: {{google-zone}}
+        GOOGLE_SERVICE_ACCOUNT: {{google-service-account}}
+        BUCKET_PATH: clusters-google/
         BUCKET_NAME: {{tf-bucket-name}}
 resource_types:
 
@@ -42,6 +45,9 @@ resources:
     env:
       AWS_ACCESS_KEY_ID: {{tf-machine-access-key-id}}
       AWS_SECRET_ACCESS_KEY: {{tf-machine-secret-access-key}}
+      GOOGLE_CREDENTIALS: {{google-service-account-key}}
+    vars:
+      project_id: {{google-project-id}}
     storage:
       access_key_id: {{tf-machine-access-key-id}}
       secret_access_key: {{tf-machine-secret-access-key}}
@@ -49,7 +55,7 @@ resources:
       # This is not parameterized, on purpose. All tfstates will go to this spot,
       # and different teams will place there clusters' tfstate files under different paths
       bucket: gpdb5-pipeline-dynamic-terraform
-      bucket_path: clusters/
+      bucket_path: clusters-google/
 
 - name: perf_src
   type: git
@@ -113,32 +119,23 @@ ccp_create_params_anchor: &ccp_default_params
   action: create
   delete_on_failure: true
   generate_random_name: true
-  terraform_source: ccp_src/aws/
+  terraform_source: ccp_src/google/
 
 ccp_vars_anchor: &ccp_default_vars
-  aws_instance-node-instance_type: t2.medium
-  aws_ebs_volume_type: standard
-  platform: centos6
+  instance_type: n1-standard-1
+  PLATFORM: centos6
 
 ccp_destroy_anchor: &ccp_destroy
   put: terraform
-  tags: ["ccp"]
   params:
     action: destroy
     env_name_file: terraform/name
-    terraform_source: ccp_src/aws/
+    terraform_source: ccp_src/google/
     vars:
       aws_instance-node-instance_type: t2.micro #t2.micro is ignored in destroy, but aws_instance-node-instance_type is required.
-      aws_ebs_volume_type: standard
+      instance_type: n1-standard-1
   get_params:
     action: destroy
-
-ccp_gen_cluster_default_params_anchor: &ccp_gen_cluster_default_params
-  AWS_ACCESS_KEY_ID: {{tf-machine-access-key-id}}
-  AWS_SECRET_ACCESS_KEY: {{tf-machine-secret-access-key}}
-  AWS_DEFAULT_REGION: {{aws-region}}
-  BUCKET_PATH: clusters/
-  BUCKET_NAME: {{tf-bucket-name}}
 
 
 
@@ -172,46 +169,40 @@ jobs:
   plan:
   - aggregate:
     - get: ccp_src
-      tags: ["ccp"]
     - get: perf_src
-      tags: ["ccp"]
     - get: gpdb_src
-      tags: ["ccp"]
       params:
         submodules:
         - gpMgmt/bin/pythonSrc/ext
       passed: [compile_gpdb_centos6]
     - get: bin_gpdb4_centos6
-      tags: ["ccp"]
     - get: bin_gpdb5_centos6
-      tags: ["ccp"]
     - get: bin_gpdb6_centos6
-      tags: ["ccp"]
       passed: [compile_gpdb_centos6]
       trigger: true
     - get: centos-gpdb-dev-6
-      tags: ["ccp"]
   - put: terraform
-    tags: ["ccp"]
     params:
       <<: *ccp_default_params
       vars:
         <<: *ccp_default_vars
   - task: gen_cluster
-    tags: ["ccp"]
     file: ccp_src/ci/tasks/gen_cluster.yml
     params:
       AWS_ACCESS_KEY_ID: {{tf-machine-access-key-id}}
       AWS_SECRET_ACCESS_KEY: {{tf-machine-secret-access-key}}
       AWS_DEFAULT_REGION: {{aws-region}}
-      BUCKET_PATH: clusters/
+      BUCKET_PATH: clusters-google/
       BUCKET_NAME: {{tf-bucket-name}}
-      platform: centos6
+      PLATFORM: centos6
+      CLOUD_PROVIDER: google
     input_mapping:
       gpdb_binary: {{initial-cluster-gpdb-binary}}
 
+  - task: gpinitsystem
+    file: ccp_src/ci/tasks/gpinitsystem.yml
+
   - task: setup_cluster
-    tags: ["ccp"]
     input_mapping:
       new_gpdb_binary: {{upgraded-cluster-gpdb-binary}}
     config:
@@ -242,7 +233,7 @@ jobs:
           # output.
           DEBUG_UPGRADE=${DEBUG_UPGRADE:-}
 
-          ./ccp_src/aws/setup_ssh_to_cluster.sh
+          ./ccp_src/scripts/setup_ssh_to_cluster.sh
 
           DIRNAME=$(dirname "$0")
 
@@ -257,7 +248,7 @@ jobs:
           extract_gpdb_tarball() {
               local node_hostname=$1
               local tarball_dir=$2
-              # Commonly the incoming binary will be called bin_gpdb.tar.gz. Because many other teams/pipelines tend to use 
+              # Commonly the incoming binary will be called bin_gpdb.tar.gz. Because many other teams/pipelines tend to use
               # that naming convention we are not, deliberately. Once the file crosses into our domain, we will not use
               # the conventional name.  This should make clear that we will install any valid binary, not just those that follow
               # the naming convention.
